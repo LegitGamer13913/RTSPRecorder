@@ -9,7 +9,8 @@ android {
 
     defaultConfig {
         applicationId = "com.example.rtsprecorder"
-        minSdk = 34
+        // FIXED: Changed to 26 to match your code's NotificationChannel check (Build.VERSION_CODES.O)
+        minSdk = 26
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
@@ -40,7 +41,13 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
+
+    // This is the LibVLC dependency you had
     implementation("org.videolan.android:libvlc-all:3.4.4")
+
+    // FIXED: Added this dependency. Your code needs it for DocumentFile.
+    implementation("androidx.documentfile:documentfile:1.0.1")
+
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

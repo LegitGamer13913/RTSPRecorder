@@ -9,13 +9,15 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.content.SharedPreferences;
+import android.content.UriPermission;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
-// import android.os.PowerManager; // WAKELOCK WAS REMOVED
+import android.os.PowerManager; // <-- WAKELOCK IMPORT ADDED BACK
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ScrollView;
@@ -43,21 +45,28 @@ import java.util.Locale;
 
 public class MainActivity extends AppCompatActivity {
 
+    // --- CONSTANTS FOR PREFERENCES ---
+    public static final String PREFS_NAME = "RTSPRecorderPrefs";
+    public static final String KEY_RTSP_URL = "lastRtspUrl";
+    public static final String KEY_FOLDER_URI = "lastFolderUri";
+    public static final String KEY_LOGGING_ENABLED = "loggingEnabled";
+    // -----------------------------------
+
     private EditText rtspUrlEditText;
     private Button startRecordingButton;
     private TextView outputFilePathTextView;
     private TextView logTextView;
-    // private ScrollView logScrollView; // REMOVED: Never used
     private Button clearLogButton;
     private Button saveLogButton;
+    private Button toggleLogButton;
 
     private Uri outputFolderUri;
-    // 'logBuilder' can be final
     private final StringBuilder logBuilder = new StringBuilder();
 
     private RecordingService recordingService;
     private boolean isBound = false;
     private boolean isRecording = false;
+    private boolean isLoggingEnabled = true;
 
     private final ActivityResultLauncher<Intent> selectOutputFolderLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(),
@@ -69,9 +78,13 @@ public class MainActivity extends AppCompatActivity {
                                         outputFolderUri,
                                         Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                                 );
-                                // TODO: Use string resource R.string.folder_label
                                 outputFilePathTextView.setText("Folder: " + outputFolderUri.getLastPathSegment());
                                 addLog("Output folder selected: " + outputFolderUri.getLastPathSegment());
+
+                                getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                                        .edit()
+                                        .putString(KEY_FOLDER_URI, outputFolderUri.toString())
+                                        .apply();
                             }
                         }
                     });
@@ -85,7 +98,6 @@ public class MainActivity extends AppCompatActivity {
             isBound = true;
             if (recordingService.isRecording()) {
                 isRecording = true;
-                // TODO: Use string resource R.string.stop_recording
                 startRecordingButton.setText("Stop Recording");
                 addLog("Connected to recording service (already recording)");
             } else {
@@ -107,6 +119,7 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        // Find all views
         rtspUrlEditText = findViewById(R.id.rtspUrl);
         startRecordingButton = findViewById(R.id.startRecording);
         Button selectOutputFolderButton = findViewById(R.id.selectOutputFile);
@@ -114,11 +127,48 @@ public class MainActivity extends AppCompatActivity {
         logTextView = findViewById(R.id.logTextView);
         clearLogButton = findViewById(R.id.clearLogButton);
         saveLogButton = findViewById(R.id.saveLogButton);
+        toggleLogButton = findViewById(R.id.toggleLogButton);
 
-        // TODO: Use string resource R.string.select_output_folder
+        // --- LOAD SAVED PREFERENCES ---
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+
+        // Load URL
+        String savedUrl = prefs.getString(KEY_RTSP_URL, null);
+        if (savedUrl != null) {
+            rtspUrlEditText.setText(savedUrl);
+        }
+
+        // Load Folder URI
+        String savedUriString = prefs.getString(KEY_FOLDER_URI, null);
+        if (savedUriString != null) {
+            Uri tempUri = Uri.parse(savedUriString);
+            boolean hasPermission = false;
+            for (UriPermission perm : getContentResolver().getPersistedUriPermissions()) {
+                if (perm.isWritePermission() && perm.getUri().equals(tempUri)) {
+                    hasPermission = true;
+                    break;
+                }
+            }
+
+            if (hasPermission) {
+                outputFolderUri = tempUri;
+                outputFilePathTextView.setText("Folder: " + outputFolderUri.getLastPathSegment());
+                addLog("Loaded saved output folder: " + outputFolderUri.getLastPathSegment());
+            } else {
+                addLog("Saved folder permission lost, please re-select.");
+                prefs.edit().remove(KEY_FOLDER_URI).apply();
+            }
+        }
+
+        // Load logging preference
+        isLoggingEnabled = prefs.getBoolean(KEY_LOGGING_ENABLED, true);
+        updateToggleLogButtonText();
+        // ------------------------------------
+
         selectOutputFolderButton.setText("Select Output Folder");
-
         addLog("Application started");
+
+        // --- SET ALL CLICK LISTENERS ---
 
         selectOutputFolderButton.setOnClickListener(v -> {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
@@ -131,18 +181,15 @@ public class MainActivity extends AppCompatActivity {
                 addLog("Stopping recording...");
                 stopRecordingService();
                 isRecording = false;
-                // TODO: Use string resource R.string.start_recording
                 startRecordingButton.setText("Start Recording");
             } else {
                 String rtspUrl = rtspUrlEditText.getText().toString().trim();
                 if (rtspUrl.isEmpty()) {
-                    // TODO: Use string resource
                     Toast.makeText(MainActivity.this, "Please enter an RTSP URL", Toast.LENGTH_SHORT).show();
                     addLog("ERROR: RTSP URL is empty");
                     return;
                 }
                 if (outputFolderUri == null) {
-                    // TODO: Use string resource
                     Toast.makeText(MainActivity.this, "Please select an output folder", Toast.LENGTH_SHORT).show();
                     addLog("ERROR: Output folder not selected");
                     return;
@@ -150,32 +197,62 @@ public class MainActivity extends AppCompatActivity {
 
                 addLog("Starting recording: " + rtspUrl);
                 startRecordingService(rtspUrl, outputFolderUri);
+
+                getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                        .edit()
+                        .putString(KEY_RTSP_URL, rtspUrl)
+                        .apply();
+
                 isRecording = true;
-                // TODO: Use string resource R.string.stop_recording
                 startRecordingButton.setText("Stop Recording");
             }
         });
 
         clearLogButton.setOnClickListener(v -> {
             logBuilder.setLength(0);
-            // TODO: Use string resource R.string.logs_cleared
             logTextView.setText("Logs cleared...");
             addLog("Log cleared");
         });
 
         saveLogButton.setOnClickListener(v -> saveLogToFile());
+
+        toggleLogButton.setOnClickListener(v -> {
+            isLoggingEnabled = !isLoggingEnabled;
+            String status = isLoggingEnabled ? "ENABLED" : "DISABLED";
+            addLog("Logging " + status);
+            updateToggleLogButtonText();
+
+            getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit()
+                    .putBoolean(KEY_LOGGING_ENABLED, isLoggingEnabled)
+                    .apply();
+        });
+    }
+
+    @SuppressLint("SetTextI18n")
+    private void updateToggleLogButtonText() {
+        if (isLoggingEnabled) {
+            toggleLogButton.setText("Log: ON");
+            // Set color if needed
+        } else {
+            toggleLogButton.setText("Log: OFF");
+            // Set color if needed
+        }
     }
 
     private void addLog(String message) {
+        final boolean isToggleMessage = message.startsWith("Logging ");
+        if (!isLoggingEnabled && !isToggleMessage) {
+            return;
+        }
+
         runOnUiThread(() -> {
-            // Use Locale.US for consistent timestamp formatting
             String timestamp = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
             String logEntry = "[" + timestamp + "] " + message + "\n";
             logBuilder.append(logEntry);
             logTextView.setText(logBuilder.toString());
 
             logTextView.post(() -> {
-                // Find ScrollView dynamically
                 ScrollView scrollView = (ScrollView) logTextView.getParent();
                 scrollView.fullScroll(ScrollView.FOCUS_DOWN);
             });
@@ -184,31 +261,31 @@ public class MainActivity extends AppCompatActivity {
 
     private void saveLogToFile() {
         if (outputFolderUri == null) {
-            // TODO: Use string resource
             Toast.makeText(this, "Please select output folder first", Toast.LENGTH_SHORT).show();
             addLog("ERROR: Cannot save log - no output folder selected");
             return;
         }
+
+        boolean wasLoggingEnabled = isLoggingEnabled;
+        isLoggingEnabled = true;
+        addLog("Saving log to file...");
 
         new Thread(() -> {
             try {
                 DocumentFile folder = DocumentFile.fromTreeUri(this, outputFolderUri);
                 if (folder == null || !folder.exists() || !folder.isDirectory()) {
                     runOnUiThread(() -> {
-                        // TODO: Use string resource
                         Toast.makeText(this, "Output folder not accessible", Toast.LENGTH_SHORT).show();
                         addLog("ERROR: Output folder not accessible");
                     });
                     return;
                 }
 
-                // Use Locale.US for consistent file naming
                 String fileName = "recording_log_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + ".txt";
                 DocumentFile logFile = folder.createFile("text/plain", fileName);
 
                 if (logFile == null) {
                     runOnUiThread(() -> {
-                        // TODO: Use string resource
                         Toast.makeText(this, "Failed to create log file", Toast.LENGTH_SHORT).show();
                         addLog("ERROR: Failed to create log file");
                     });
@@ -220,21 +297,20 @@ public class MainActivity extends AppCompatActivity {
                         fos.write(logBuilder.toString().getBytes());
                         fos.flush();
                     }
-                } // try-with-resources handles closing fos
+                }
 
                 runOnUiThread(() -> {
-                    // TODO: Use string resource
                     Toast.makeText(this, "Log saved: " + fileName, Toast.LENGTH_SHORT).show();
                     addLog("Log saved to: " + fileName);
                 });
 
             } catch (Exception e) {
-                // Replaced printStackTrace with log
                 addLog("ERROR saving log: " + e.getMessage());
                 runOnUiThread(() -> {
-                    // TODO: Use string resource
                     Toast.makeText(this, "Error saving log: " + e.getMessage(), Toast.LENGTH_LONG).show();
                 });
+            } finally {
+                isLoggingEnabled = wasLoggingEnabled;
             }
         }).start();
     }
@@ -276,8 +352,11 @@ public class MainActivity extends AppCompatActivity {
         void log(String message);
     }
 
+    //
+    // --- RECORDING SERVICE ---
+    //
     public static class RecordingService extends Service {
-        private static final long SEGMENT_DURATION_MS = 1 * 60 * 1000; // 1 minute
+        private static final long SEGMENT_DURATION_MS = 3 * 60 * 1000; // 3 minutes
         private static final long RECONNECT_DELAY_SHORT_MS = 3000; // 3 seconds
         private static final long RECONNECT_DELAY_LONG_MS = 10000; // 10 seconds
         private static final long MIN_SEGMENT_SIZE_BYTES = 1024 * 100; // 100 KB minimum
@@ -301,11 +380,9 @@ public class MainActivity extends AppCompatActivity {
         private Handler watchdogHandler;
         private Runnable watchdogRunnable;
         private LogCallback logCallback;
-        // WAKELOCK WAS REMOVED
+        private PowerManager.WakeLock wakeLock; // <-- WAKELOCK VARIABLE ADDED BACK
 
         private long segmentStartTime = 0;
-        // REMOVED: 'lastSuccessfulConnection' was assigned but never accessed
-        // private long lastSuccessfulConnection = 0;
         private int consecutiveFailures = 0;
         private boolean isConnecting = false;
 
@@ -331,7 +408,6 @@ public class MainActivity extends AppCompatActivity {
 
         private void log(String message) {
             if (logCallback != null) {
-                // Run on main thread to avoid concurrency issues with UI
                 Handler handler = new Handler(getMainLooper());
                 handler.post(() -> logCallback.log(message));
             }
@@ -341,7 +417,17 @@ public class MainActivity extends AppCompatActivity {
         public void onCreate() {
             super.onCreate();
 
-            // WAKELOCK WAS REMOVED
+            // --- WAKELOCK ACQUIRE ADDED BACK ---
+            PowerManager powerManager = (PowerManager) getSystemService(POWER_SERVICE);
+            if (powerManager != null) {
+                wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "RTSPRecorder::WakeLock");
+                // Use acquire(timeout) if you want it to release automatically, but for long running tasks, just acquire() is common.
+                wakeLock.acquire();
+                log("Partial WakeLock acquired");
+            } else {
+                log("ERROR: PowerManager is null, cannot acquire WakeLock");
+            }
+            // ------------------------------------
 
             ArrayList<String> options = new ArrayList<>();
             options.add("-vvv");
@@ -357,7 +443,6 @@ public class MainActivity extends AppCompatActivity {
                 mediaPlayer = new MediaPlayer(libVLC);
                 log("Recording service created with LibVLC");
             } catch (Exception e) {
-                // Replaced printStackTrace with log
                 log("ERROR: Failed to create LibVLC: " + e.getMessage());
             }
 
@@ -385,7 +470,6 @@ public class MainActivity extends AppCompatActivity {
             String outputFolderUriString = intent.getStringExtra("outputFolderUri");
 
             if (rtspUrl == null || outputFolderUriString == null) {
-                // TODO: Use string resource
                 Toast.makeText(this, "Missing URL or output folder", Toast.LENGTH_SHORT).show();
                 log("ERROR: Missing URL or output folder");
                 stopSelf();
@@ -400,7 +484,6 @@ public class MainActivity extends AppCompatActivity {
             log("Service starting with URL: " + rtspUrl);
 
             createNotificationChannel();
-            // TODO: Use string resource
             startForeground(1, buildNotification("Initializing..."));
             log("Foreground service started");
 
@@ -422,7 +505,12 @@ public class MainActivity extends AppCompatActivity {
 
             log("Service stopping...");
 
-            // WAKELOCK WAS REMOVED
+            // --- WAKELOCK RELEASE ADDED BACK ---
+            if (wakeLock != null && wakeLock.isHeld()) {
+                wakeLock.release();
+                log("Wake lock released");
+            }
+            // ------------------------------------
 
             // Cancel all handlers
             if (segmentHandler != null && segmentRunnable != null) {
@@ -458,7 +546,6 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
 
-            // Refactored logic to reduce duplication
             if (tempFile != null && tempFile.exists()) {
                 if (tempFile.length() > MIN_SEGMENT_SIZE_BYTES) {
                     log("Saving final segment...");
@@ -471,7 +558,6 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
 
-            // TODO: Use string resource
             Toast.makeText(this, "Recording stopped. " + (segmentCounter + 1) + " segments saved.", Toast.LENGTH_SHORT).show();
             log("Recording stopped. Total segments: " + (segmentCounter + 1));
         }
@@ -481,7 +567,6 @@ public class MainActivity extends AppCompatActivity {
             handler.post(action);
         }
 
-        // Suppress false "typo" warnings for VLC options
         @SuppressLint("SpellCheckingInspection")
         private void startNewSegment() {
             if (!shouldBeRecording) {
@@ -498,7 +583,6 @@ public class MainActivity extends AppCompatActivity {
                 isConnecting = true;
                 connectionState = ConnectionState.CONNECTING;
                 log("Starting new segment " + (segmentCounter + 1));
-                // TODO: Use string resource
                 updateNotification("Connecting to stream...");
 
                 // Stop and save previous segment
@@ -532,7 +616,6 @@ public class MainActivity extends AppCompatActivity {
                 // Create media
                 final Media media = new Media(libVLC, Uri.parse(rtspUrl));
 
-                // These are NOT typos. They are LibVLC options.
                 String soutChain = ":sout=#transcode{vcodec=h264,vb=2000,acodec=mp4a,ab=128}:std{access=file,mux=mp4,dst='" + tempFile.getAbsolutePath() + "'}";
 
                 media.addOption(soutChain);
@@ -547,7 +630,6 @@ public class MainActivity extends AppCompatActivity {
                         case MediaPlayer.Event.Opening:
                             connectionState = ConnectionState.CONNECTING;
                             log("Stream opening...");
-                            // TODO: Use string resource
                             updateNotification("Opening stream...");
                             startConnectionWatchdog();
                             break;
@@ -556,8 +638,6 @@ public class MainActivity extends AppCompatActivity {
                             isConnecting = false;
                             connectionState = ConnectionState.CONNECTED;
                             consecutiveFailures = 0;
-                            // REMOVED: 'lastSuccessfulConnection' was not used
-                            // lastSuccessfulConnection = System.currentTimeMillis();
                             segmentStartTime = System.currentTimeMillis();
                             isRecording = true;
 
@@ -565,19 +645,15 @@ public class MainActivity extends AppCompatActivity {
                             cancelReconnect();
 
                             log("✓ Successfully connected - Recording segment " + (segmentCounter + 1));
-                            // TODO: Use string resource
                             updateNotification("Recording segment " + (segmentCounter + 1));
-                            // TODO: Use string resource
                             Toast.makeText(this, "Recording segment " + (segmentCounter + 1), Toast.LENGTH_SHORT).show();
 
-                            // Schedule next segment
                             scheduleNextSegment();
                             break;
 
                         case MediaPlayer.Event.Buffering:
                             float buffering = event.getBuffering();
                             if (buffering < 100) {
-                                // Use Locale.US for consistent number formatting
                                 log("Buffering: " + String.format(Locale.US, "%.1f", buffering) + "%");
                             }
                             break;
@@ -615,7 +691,6 @@ public class MainActivity extends AppCompatActivity {
             } catch (Exception e) {
                 isConnecting = false;
                 connectionState = ConnectionState.ERROR;
-                // Replaced printStackTrace with log
                 log("ERROR starting segment: " + e.getMessage());
                 handleConnectionLoss("Exception: " + e.getMessage());
             }
@@ -665,14 +740,12 @@ public class MainActivity extends AppCompatActivity {
 
             log("⚠ Connection lost: " + reason + " (failure #" + consecutiveFailures + ")");
 
-            // Cancel segment timer
             if (segmentRunnable != null) {
                 segmentHandler.removeCallbacks(segmentRunnable);
             }
 
             cancelConnectionWatchdog();
 
-            // Refactored logic to reduce duplication
             if (tempFile != null && tempFile.exists()) {
                 long recordedDuration = System.currentTimeMillis() - segmentStartTime;
                 long fileSize = tempFile.length();
@@ -692,15 +765,12 @@ public class MainActivity extends AppCompatActivity {
                 tempFile = null;
             }
 
-
-            // Determine reconnect delay based on failure history
             long reconnectDelay = (consecutiveFailures <= MAX_CONSECUTIVE_FAILURES)
                     ? RECONNECT_DELAY_SHORT_MS
                     : RECONNECT_DELAY_LONG_MS;
 
             String delayMsg = (reconnectDelay == RECONNECT_DELAY_SHORT_MS) ? "3s" : "10s";
             log("Will attempt reconnection in " + delayMsg + "...");
-            // TODO: Use string resource
             updateNotification("Reconnecting in " + delayMsg + "...");
 
             scheduleReconnect(reconnectDelay);
@@ -730,20 +800,17 @@ public class MainActivity extends AppCompatActivity {
                     DocumentFile folder = DocumentFile.fromTreeUri(this, outputFolderUri);
                     if (folder == null || !folder.exists() || !folder.isDirectory()) {
                         runOnUiThread(() -> {
-                            // TODO: Use string resource
                             Toast.makeText(this, "Output folder not accessible", Toast.LENGTH_SHORT).show();
                             log("ERROR: Output folder not accessible");
                         });
                         return;
                     }
 
-                    // Use Locale.US for consistent file naming
                     String fileName = "recording_segment_" + segmentNumber + "_" + System.currentTimeMillis() + ".mp4";
                     DocumentFile newFile = folder.createFile("video/mp4", fileName);
 
                     if (newFile == null) {
                         runOnUiThread(() -> {
-                            // TODO: Use string resource
                             Toast.makeText(this, "Failed to create file in folder", Toast.LENGTH_SHORT).show();
                             log("ERROR: Failed to create file " + fileName);
                         });
@@ -763,13 +830,11 @@ public class MainActivity extends AppCompatActivity {
                             }
                             fos.flush();
                         }
-                    } // try-with-resources handles closing fis and fos
+                    }
 
                     final long finalSize = totalBytes;
                     runOnUiThread(() -> {
-                        // Use Locale.US for consistent number formatting
                         String sizeStr = String.format(Locale.US, "%.2f MB", finalSize / 1024.0 / 1024.0);
-                        // TODO: Use string resource
                         Toast.makeText(this, "Segment " + segmentNumber + " saved (" + sizeStr + ")", Toast.LENGTH_SHORT).show();
                         log("✓ Segment " + segmentNumber + " saved: " + fileName + " (" + sizeStr + ")");
                     });
@@ -780,10 +845,8 @@ public class MainActivity extends AppCompatActivity {
                     log("Temp file deleted for segment " + segmentNumber);
 
                 } catch (Exception e) {
-                    // Replaced printStackTrace with log
                     log("ERROR saving segment " + segmentNumber + ": " + e.getMessage());
                     runOnUiThread(() -> {
-                        // TODO: Use string resource
                         Toast.makeText(this, "Error saving segment " + segmentNumber + ": ".concat(e.getMessage()), Toast.LENGTH_LONG).show();
                     });
                 }
@@ -791,7 +854,6 @@ public class MainActivity extends AppCompatActivity {
         }
 
         private Notification buildNotification(String text) {
-            // TODO: Use string resource
             return new NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
                     .setContentTitle("RTSP Recorder")
                     .setContentText(text)
@@ -812,14 +874,8 @@ public class MainActivity extends AppCompatActivity {
             return isRecording;
         }
 
-        // REMOVED: getMediaPlayer() was not used
-        // public MediaPlayer getMediaPlayer() {
-        //     return mediaPlayer;
-        // }
-
         private void createNotificationChannel() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                // TODO: Use string resource
                 NotificationChannel serviceChannel = new NotificationChannel(
                         NOTIFICATION_CHANNEL_ID,
                         "Recording Channel",

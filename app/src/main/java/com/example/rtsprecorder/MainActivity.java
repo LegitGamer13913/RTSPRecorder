@@ -13,7 +13,9 @@ import android.net.Uri;
 import android.os.Binder;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
 import android.os.IBinder;
+import android.provider.DocumentsContract;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.TextView;
@@ -24,6 +26,7 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.NotificationCompat;
 import androidx.core.content.ContextCompat;
+import androidx.documentfile.provider.DocumentFile;
 
 import org.videolan.libvlc.LibVLC;
 import org.videolan.libvlc.Media;
@@ -31,8 +34,7 @@ import org.videolan.libvlc.MediaPlayer;
 
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
+import java.io.OutputStream;
 import java.util.ArrayList;
 
 public class MainActivity extends AppCompatActivity {
@@ -41,25 +43,24 @@ public class MainActivity extends AppCompatActivity {
     private Button startRecordingButton;
     private TextView outputFilePathTextView;
 
-    private Uri outputFileUri;
-    private String outputFilePath;
+    private Uri outputFolderUri;
 
     private RecordingService recordingService;
     private boolean isBound = false;
     private boolean isRecording = false;
 
-    private final ActivityResultLauncher<Intent> selectOutputFileLauncher =
+    private final ActivityResultLauncher<Intent> selectOutputFolderLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(),
                     result -> {
                         if (result.getResultCode() == AppCompatActivity.RESULT_OK && result.getData() != null) {
-                            outputFileUri = result.getData().getData();
-                            if (outputFileUri != null) {
+                            outputFolderUri = result.getData().getData();
+                            if (outputFolderUri != null) {
                                 // Take persistable URI permission
                                 getContentResolver().takePersistableUriPermission(
-                                        outputFileUri,
+                                        outputFolderUri,
                                         Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
                                 );
-                                outputFilePathTextView.setText(outputFileUri.toString());
+                                outputFilePathTextView.setText("Folder: " + outputFolderUri.getLastPathSegment());
                             }
                         }
                     });
@@ -91,15 +92,14 @@ public class MainActivity extends AppCompatActivity {
 
         rtspUrlEditText = findViewById(R.id.rtspUrl);
         startRecordingButton = findViewById(R.id.startRecording);
-        Button selectOutputFileButton = findViewById(R.id.selectOutputFile);
+        Button selectOutputFolderButton = findViewById(R.id.selectOutputFile);
         outputFilePathTextView = findViewById(R.id.outputFilePath);
 
-        selectOutputFileButton.setOnClickListener(v -> {
-            Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
-            intent.addCategory(Intent.CATEGORY_OPENABLE);
-            intent.setType("video/mp4");
-            intent.putExtra(Intent.EXTRA_TITLE, "recording_" + System.currentTimeMillis() + ".mp4");
-            selectOutputFileLauncher.launch(intent);
+        selectOutputFolderButton.setText("Select Output Folder");
+
+        selectOutputFolderButton.setOnClickListener(v -> {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            selectOutputFolderLauncher.launch(intent);
         });
 
         startRecordingButton.setOnClickListener(v -> {
@@ -113,22 +113,22 @@ public class MainActivity extends AppCompatActivity {
                     Toast.makeText(MainActivity.this, "Please enter an RTSP URL", Toast.LENGTH_SHORT).show();
                     return;
                 }
-                if (outputFileUri == null) {
-                    Toast.makeText(MainActivity.this, "Please select an output file", Toast.LENGTH_SHORT).show();
+                if (outputFolderUri == null) {
+                    Toast.makeText(MainActivity.this, "Please select an output folder", Toast.LENGTH_SHORT).show();
                     return;
                 }
 
-                startRecordingService(rtspUrl, outputFileUri);
+                startRecordingService(rtspUrl, outputFolderUri);
                 isRecording = true;
                 startRecordingButton.setText("Stop Recording");
             }
         });
     }
 
-    private void startRecordingService(String rtspUrl, Uri outputFileUri) {
+    private void startRecordingService(String rtspUrl, Uri outputFolderUri) {
         Intent serviceIntent = new Intent(this, RecordingService.class);
         serviceIntent.putExtra("rtspUrl", rtspUrl);
-        serviceIntent.putExtra("outputFileUri", outputFileUri.toString());
+        serviceIntent.putExtra("outputFolderUri", outputFolderUri.toString());
         ContextCompat.startForegroundService(this, serviceIntent);
         bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE);
     }
@@ -159,12 +159,18 @@ public class MainActivity extends AppCompatActivity {
     }
 
     public static class RecordingService extends Service {
+        private static final long SEGMENT_DURATION_MS = 3 * 60 * 1000; // 3 minutes
+
         private LibVLC libVLC;
         private MediaPlayer mediaPlayer;
         private File tempFile;
-        private Uri finalOutputUri;
+        private Uri outputFolderUri;
+        private String rtspUrl;
+        private int segmentCounter = 0;
         private final IBinder binder = new RecordingBinder();
         private boolean isRecording = false;
+        private Handler segmentHandler;
+        private Runnable segmentRunnable;
 
         public class RecordingBinder extends Binder {
             RecordingService getService() {
@@ -183,6 +189,7 @@ public class MainActivity extends AppCompatActivity {
             libVLC = new LibVLC(this, options);
             mediaPlayer = new MediaPlayer(libVLC);
             isRecording = false;
+            segmentHandler = new Handler(getMainLooper());
         }
 
         @Override
@@ -191,16 +198,17 @@ public class MainActivity extends AppCompatActivity {
                 return START_NOT_STICKY;
             }
 
-            String rtspUrl = intent.getStringExtra("rtspUrl");
-            String outputFileUriString = intent.getStringExtra("outputFileUri");
+            rtspUrl = intent.getStringExtra("rtspUrl");
+            String outputFolderUriString = intent.getStringExtra("outputFolderUri");
 
-            if (rtspUrl == null || outputFileUriString == null) {
-                Toast.makeText(this, "Missing URL or output file", Toast.LENGTH_SHORT).show();
+            if (rtspUrl == null || outputFolderUriString == null) {
+                Toast.makeText(this, "Missing URL or output folder", Toast.LENGTH_SHORT).show();
                 stopSelf();
                 return START_NOT_STICKY;
             }
 
-            finalOutputUri = Uri.parse(outputFileUriString);
+            outputFolderUri = Uri.parse(outputFolderUriString);
+            segmentCounter = 0;
 
             createNotificationChannel();
             Notification notification = new NotificationCompat.Builder(this, "recording_channel")
@@ -212,9 +220,68 @@ public class MainActivity extends AppCompatActivity {
 
             startForeground(1, notification);
 
+            startNewSegment();
+
+            return START_STICKY;
+        }
+
+        @Override
+        public IBinder onBind(Intent intent) {
+            return binder;
+        }
+
+        @Override
+        public void onDestroy() {
+            super.onDestroy();
+            isRecording = false;
+
+            // Cancel segment timer
+            if (segmentHandler != null && segmentRunnable != null) {
+                segmentHandler.removeCallbacks(segmentRunnable);
+            }
+
+            if (mediaPlayer != null) {
+                if (mediaPlayer.isPlaying()) {
+                    mediaPlayer.stop();
+                }
+                mediaPlayer.release();
+                mediaPlayer = null;
+            }
+
+            if (libVLC != null) {
+                libVLC.release();
+                libVLC = null;
+            }
+
+            // Save the last segment
+            if (tempFile != null && tempFile.exists()) {
+                saveSegmentToFolder(tempFile, segmentCounter);
+            }
+
+            Toast.makeText(this, "Recording stopped. " + (segmentCounter + 1) + " segments saved.", Toast.LENGTH_SHORT).show();
+        }
+
+        private void runOnUiThread(Runnable action) {
+            android.os.Handler handler = new android.os.Handler(getMainLooper());
+            handler.post(action);
+        }
+
+        private void startNewSegment() {
             try {
-                // Create a temporary file in cache directory
-                tempFile = new File(getCacheDir(), "temp_recording_" + System.currentTimeMillis() + ".mp4");
+                // Stop current recording if exists
+                if (mediaPlayer != null && mediaPlayer.isPlaying()) {
+                    mediaPlayer.stop();
+
+                    // Save the previous segment
+                    if (tempFile != null && tempFile.exists()) {
+                        final File fileToSave = tempFile;
+                        final int currentSegment = segmentCounter - 1;
+                        saveSegmentToFolder(fileToSave, currentSegment);
+                    }
+                }
+
+                // Create a new temporary file for this segment
+                tempFile = new File(getCacheDir(), "temp_segment_" + segmentCounter + "_" + System.currentTimeMillis() + ".mp4");
 
                 final Media media = new Media(libVLC, Uri.parse(rtspUrl));
 
@@ -244,7 +311,16 @@ public class MainActivity extends AppCompatActivity {
 
                 mediaPlayer.play();
                 isRecording = true;
-                Toast.makeText(this, "Recording started to: " + tempFile.getAbsolutePath(), Toast.LENGTH_LONG).show();
+
+                updateNotification("Recording segment " + (segmentCounter + 1));
+                Toast.makeText(this, "Recording segment " + (segmentCounter + 1), Toast.LENGTH_SHORT).show();
+
+                // Schedule next segment
+                segmentRunnable = () -> {
+                    segmentCounter++;
+                    startNewSegment();
+                };
+                segmentHandler.postDelayed(segmentRunnable, SEGMENT_DURATION_MS);
 
             } catch (Exception e) {
                 e.printStackTrace();
@@ -253,74 +329,78 @@ public class MainActivity extends AppCompatActivity {
                     tempFile.delete();
                 }
                 stopSelf();
-                return START_NOT_STICKY;
             }
-
-            return START_STICKY;
         }
 
-        @Override
-        public IBinder onBind(Intent intent) {
-            return binder;
-        }
-
-        @Override
-        public void onDestroy() {
-            super.onDestroy();
-            isRecording = false;
-
-            if (mediaPlayer != null) {
-                if (mediaPlayer.isPlaying()) {
-                    mediaPlayer.stop();
-                }
-                mediaPlayer.release();
-                mediaPlayer = null;
-            }
-
-            if (libVLC != null) {
-                libVLC.release();
-                libVLC = null;
-            }
-
-            // Copy temp file to final destination
-            if (tempFile != null && tempFile.exists() && finalOutputUri != null) {
-                new Thread(() -> {
-                    try {
-                        FileInputStream fis = new FileInputStream(tempFile);
-                        FileOutputStream fos = (FileOutputStream) getContentResolver().openOutputStream(finalOutputUri);
-
-                        if (fos != null) {
-                            byte[] buffer = new byte[8192];
-                            int bytesRead;
-                            while ((bytesRead = fis.read(buffer)) != -1) {
-                                fos.write(buffer, 0, bytesRead);
-                            }
-                            fos.flush();
-                            fos.close();
-                        }
-                        fis.close();
-
-                        // Delete temp file
-                        tempFile.delete();
-
+        private void saveSegmentToFolder(File segmentFile, int segmentNumber) {
+            new Thread(() -> {
+                try {
+                    // Create DocumentFile from folder URI
+                    DocumentFile folder = DocumentFile.fromTreeUri(this, outputFolderUri);
+                    if (folder == null || !folder.exists() || !folder.isDirectory()) {
                         runOnUiThread(() ->
-                                Toast.makeText(this, "Recording saved successfully", Toast.LENGTH_LONG).show()
+                                Toast.makeText(this, "Output folder not accessible", Toast.LENGTH_SHORT).show()
                         );
-                    } catch (IOException e) {
-                        e.printStackTrace();
+                        return;
+                    }
+
+                    // Create new file in the folder
+                    String fileName = "recording_segment_" + segmentNumber + "_" + System.currentTimeMillis() + ".mp4";
+                    DocumentFile newFile = folder.createFile("video/mp4", fileName);
+
+                    if (newFile == null) {
                         runOnUiThread(() ->
-                                Toast.makeText(this, "Error saving file: " + e.getMessage(), Toast.LENGTH_LONG).show()
+                                Toast.makeText(this, "Failed to create file in folder", Toast.LENGTH_SHORT).show()
+                        );
+                        return;
+                    }
+
+                    // Copy temp file to the new document file
+                    FileInputStream fis = new FileInputStream(segmentFile);
+                    OutputStream fos = getContentResolver().openOutputStream(newFile.getUri());
+
+                    if (fos != null) {
+                        byte[] buffer = new byte[8192];
+                        int bytesRead;
+                        long totalBytes = 0;
+                        while ((bytesRead = fis.read(buffer)) != -1) {
+                            fos.write(buffer, 0, bytesRead);
+                            totalBytes += bytesRead;
+                        }
+                        fos.flush();
+                        fos.close();
+
+                        final long finalSize = totalBytes;
+                        runOnUiThread(() ->
+                                Toast.makeText(this, "Segment " + segmentNumber + " saved (" + (finalSize / 1024 / 1024) + " MB)", Toast.LENGTH_SHORT).show()
                         );
                     }
-                }).start();
-            }
+                    fis.close();
 
-            Toast.makeText(this, "Recording stopped", Toast.LENGTH_SHORT).show();
+                    // Delete temp file
+                    segmentFile.delete();
+
+                } catch (Exception e) {
+                    e.printStackTrace();
+                    runOnUiThread(() ->
+                            Toast.makeText(this, "Error saving segment " + segmentNumber + ": " + e.getMessage(), Toast.LENGTH_LONG).show()
+                    );
+                }
+            }).start();
         }
 
-        private void runOnUiThread(Runnable action) {
-            android.os.Handler handler = new android.os.Handler(getMainLooper());
-            handler.post(action);
+        private void updateNotification(String text) {
+            Notification notification = new NotificationCompat.Builder(this, "recording_channel")
+                    .setContentTitle("RTSP Recorder")
+                    .setContentText(text)
+                    .setSmallIcon(R.mipmap.ic_launcher)
+                    .setPriority(NotificationCompat.PRIORITY_LOW)
+                    .build();
+
+            NotificationManager notificationManager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (notificationManager != null) {
+                notificationManager.notify(1, notification);
+            }
         }
 
         public MediaPlayer getMediaPlayer() {

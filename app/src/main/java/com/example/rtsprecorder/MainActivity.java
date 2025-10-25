@@ -44,6 +44,7 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.Locale;
 
+// MainActivity remains unchanged from your last version provided
 public class MainActivity extends AppCompatActivity {
 
     // Keys for storing settings
@@ -339,10 +340,10 @@ public class MainActivity extends AppCompatActivity {
     // --- Background Recording Service ---
     public static class RecordingService extends Service {
         // Configuration
-        private static final long SEGMENT_DURATION_MS = 3 * 60 * 1000; // 3 minutes
+        private static final long SEGMENT_DURATION_MS = 3 * 60 * 1000;
         private static final long RECONNECT_DELAY_SHORT_MS = 3000;
         private static final long RECONNECT_DELAY_LONG_MS = 10000;
-        private static final long MIN_SEGMENT_SIZE_BYTES = 1024 * 100; // 100 KB
+        private static final long MIN_SEGMENT_SIZE_BYTES = 1024 * 100; // Keep this - used in onDestroy
         private static final long CONNECTION_TIMEOUT_MS = 30000;
         private static final int MAX_CONSECUTIVE_FAILURES = 5;
         private static final String NOTIFICATION_CHANNEL_ID = "recording_channel";
@@ -360,7 +361,7 @@ public class MainActivity extends AppCompatActivity {
         private Handler segmentHandler, reconnectHandler, watchdogHandler;
         private Runnable segmentRunnable, watchdogRunnable;
         private LogCallback logCallback;
-        private PowerManager.WakeLock wakeLock; // WakeLock reference
+        private PowerManager.WakeLock wakeLock;
         private long segmentStartTime = 0;
         private int consecutiveFailures = 0;
         private boolean isConnecting = false;
@@ -368,33 +369,27 @@ public class MainActivity extends AppCompatActivity {
 
         private enum ConnectionState { DISCONNECTED, CONNECTING, CONNECTED, RECONNECTING, ERROR }
 
-        // Binder for clients
         public class RecordingBinder extends Binder { RecordingService getService() { return RecordingService.this; } }
 
-        // Setter for log callback
         public void setLogCallback(LogCallback callback) { this.logCallback = callback; }
 
-        // Log helper, posts to main thread
         private void log(String message) {
             if (logCallback != null) {
                 new Handler(getMainLooper()).post(() -> logCallback.log(message));
             }
         }
 
-        // Service initialization
         @Override
         public void onCreate() {
             super.onCreate();
-            acquireWakeLock(); // Acquire WakeLock
-            initializeLibVLC(); // Initialize LibVLC
-            // Initialize handlers
+            acquireWakeLock();
+            initializeLibVLC();
             segmentHandler = new Handler(getMainLooper());
             reconnectHandler = new Handler(getMainLooper());
             watchdogHandler = new Handler(getMainLooper());
             log("Recording service initialized");
         }
 
-        // Acquire CPU WakeLock
         private void acquireWakeLock() {
             PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
             if (pm != null) {
@@ -406,28 +401,24 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
-        // Initialize LibVLC instance
         private void initializeLibVLC() {
             ArrayList<String> options = new ArrayList<>();
-            options.add("-vvv"); // Verbose logs
-            options.add("--network-caching=1500"); // Reduced caching
+            options.add("-vvv");
+            options.add("--network-caching=1500");
             options.add("--rtsp-tcp");
-            options.add("--file-caching=1500"); // Reduced caching
-            // Add other necessary options here if needed
+            options.add("--file-caching=1500");
             try {
                 libVLC = new LibVLC(this, options);
                 mediaPlayer = new MediaPlayer(libVLC);
                 log("LibVLC initialized");
             } catch (Exception e) {
                 log("ERROR creating LibVLC: " + e.getMessage());
-                // Handle critical failure?
             }
         }
 
-        // Handles service start commands
         @Override
         public int onStartCommand(Intent intent, int flags, int startId) {
-            if (intent == null) { // Service restarted
+            if (intent == null) {
                 log("Service restarted by system");
                 if (rtspUrl != null && outputFolderUri != null && shouldBeRecording) {
                     log("Attempting resume...");
@@ -436,7 +427,6 @@ public class MainActivity extends AppCompatActivity {
                 return START_STICKY;
             }
 
-            // Get data from intent
             rtspUrl = intent.getStringExtra("rtspUrl");
             String outputFolderUriString = intent.getStringExtra("outputFolderUri");
             if (rtspUrl == null || outputFolderUriString == null) {
@@ -446,41 +436,43 @@ public class MainActivity extends AppCompatActivity {
                 return START_NOT_STICKY;
             }
 
-            // Initialize state for this recording session
             outputFolderUri = Uri.parse(outputFolderUriString);
             segmentCounter = 0;
             shouldBeRecording = true;
             consecutiveFailures = 0;
             log("Service starting: " + rtspUrl);
 
-            // Start foreground service
             createNotificationChannel();
             startForeground(1, buildNotification("Initializing..."));
             log("Foreground service started");
 
-            startNewSegment(); // Begin recording
+            startNewSegment();
             return START_STICKY;
         }
 
-        @Override public IBinder onBind(Intent intent) { return binder; } // Return binder
+        @Override public IBinder onBind(Intent intent) { return binder; }
 
-        // Service cleanup
         @Override
         public void onDestroy() {
             super.onDestroy();
             shouldBeRecording = false;
             isRecording = false;
             log("Service stopping...");
-            releaseWakeLock(); // Release WakeLock
-            cancelAllHandlers(); // Cancel timers
-            releaseMediaPlayer(); // Stop player
-            releaseLibVLC(); // Release LibVLC
-            saveFinalSegment(); // Save last part
-            log("Recording stopped. Segments saved: " + (segmentCounter + (tempFile != null && tempFile.exists() && tempFile.length() > MIN_SEGMENT_SIZE_BYTES ? 1 : 0)));
+            releaseWakeLock();
+            cancelAllHandlers();
+            releaseMediaPlayer();
+            releaseLibVLC();
+            saveFinalSegment(); // Still need to save the *last* segment if valid
+            // Clean up potentially leftover temp file from a previous crash/stop
+            if (tempFile != null && tempFile.exists()) {
+                log("Deleting leftover temp file on destroy: " + tempFile.getName());
+                if (!tempFile.delete()) log("WARN: Failed to delete leftover temp file");
+                tempFile = null;
+            }
+            log("Recording stopped."); // Simpler message, rely on save logs for segment count
             Toast.makeText(this, "Recording stopped", Toast.LENGTH_SHORT).show();
         }
 
-        // Release CPU WakeLock
         private void releaseWakeLock() {
             if (wakeLock != null && wakeLock.isHeld()) {
                 wakeLock.release();
@@ -488,16 +480,14 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
-        // Cancel all pending Handler callbacks
         private void cancelAllHandlers() {
             if (segmentHandler != null && segmentRunnable != null) segmentHandler.removeCallbacks(segmentRunnable);
             if (reconnectHandler != null) reconnectHandler.removeCallbacksAndMessages(null);
             if (watchdogHandler != null && watchdogRunnable != null) watchdogHandler.removeCallbacks(watchdogRunnable);
-            segmentRunnable = null; // Clear runnable references
+            segmentRunnable = null;
             watchdogRunnable = null;
         }
 
-        // Safely stop and release MediaPlayer
         private void releaseMediaPlayer() {
             if (mediaPlayer != null) {
                 try {
@@ -508,7 +498,6 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
-        // Safely release LibVLC
         private void releaseLibVLC() {
             if (libVLC != null) {
                 try { libVLC.release(); } catch (Exception e) { log("ERROR releasing LibVLC: " + e.getMessage()); }
@@ -516,27 +505,27 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
-        // Save the last segment if valid
+        // Save the final segment if it's valid (called during onDestroy)
         private void saveFinalSegment() {
             if (tempFile != null && tempFile.exists()) {
                 if (tempFile.length() > MIN_SEGMENT_SIZE_BYTES) {
                     log("Saving final segment...");
-                    saveSegmentToFolder(tempFile, segmentCounter);
+                    saveSegmentToFolder(tempFile, segmentCounter); // Save the last successfully recorded segment
+                    // Don't increment counter here as it's the end
                 } else {
                     log("Deleting incomplete final segment (size: " + tempFile.length() + ")");
                     if (!tempFile.delete()) log("WARN: Failed to delete final temp file");
                 }
-                tempFile = null;
+                tempFile = null; // Ensure tempFile is cleared
             }
         }
 
-        // Helper to run code on main thread
+
         private void runOnUiThread(Runnable action) { new Handler(getMainLooper()).post(action); }
 
-        // Core logic to start recording a new segment
         @SuppressLint("SpellCheckingInspection")
         private void startNewSegment() {
-            if (!shouldBeRecording || isConnecting) { // Check state
+            if (!shouldBeRecording || isConnecting) {
                 log(!shouldBeRecording ? "Recording cancelled" : "Already connecting");
                 return;
             }
@@ -547,30 +536,28 @@ public class MainActivity extends AppCompatActivity {
                 log("Starting segment " + (segmentCounter + 1));
                 updateNotification("Connecting...");
 
-                // Stop/save previous segment if needed
-                handlePreviousSegment();
+                // Stop previous segment recording (but DO NOT save it yet)
+                handleStopPreviousSegment();
+                // Save the *previous* complete segment (if it exists and is valid)
+                savePreviousCompleteSegment();
 
-                // Create new temp file
-                createNewTempFile();
+                createNewTempFile(); // Create a new temp file for the current segment
 
-                // Setup LibVLC Media
                 final Media media = new Media(libVLC, Uri.parse(rtspUrl));
 
-                // *** MODIFIED SOUT CHAIN FOR STREAM COPY (NO TRANSCODING / LOW HEAT / NO AUDIO) ***
+                // *** SOUT CHAIN FOR STREAM COPY (LOW HEAT / NO AUDIO) ***
                 String soutChain = ":sout=#file{dst='" + tempFile.getAbsolutePath() + "'}";
                 media.addOption(soutChain);
                 media.addOption(":sout-keep");
-                // Removed: :no-sout-all, :sout-audio, :sout-video (less relevant for #file)
+                // Removed options not needed for #file
 
-                // Setup event listener
                 setupMediaPlayerEventListener();
 
-                // Start playback/recording
                 mediaPlayer.setMedia(media);
                 media.release();
                 log("Starting playback (stream copy)...");
                 mediaPlayer.play();
-                startConnectionWatchdog(); // Start connection timeout timer
+                startConnectionWatchdog();
 
             } catch (Exception e) {
                 isConnecting = false;
@@ -580,32 +567,39 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
-        // Stops player and saves previous segment if valid
-        private void handlePreviousSegment() {
+        // Stops the media player if it's playing, leaving tempFile intact
+        private void handleStopPreviousSegment() {
             if (mediaPlayer != null && mediaPlayer.isPlaying()) {
-                try { mediaPlayer.stop(); log("Previous player stopped"); }
-                catch (Exception e) { log("ERROR stopping player: " + e.getMessage()); }
+                try {
+                    mediaPlayer.stop();
+                    log("Previous player stopped for new segment");
+                } catch (Exception e) {
+                    log("ERROR stopping player for new segment: " + e.getMessage());
+                }
             }
-            // Save if temp file exists and is large enough
+        }
+
+        // Saves the previously recorded tempFile if it exists and is valid
+        private void savePreviousCompleteSegment() {
             if (tempFile != null && tempFile.exists()) {
                 if (tempFile.length() > MIN_SEGMENT_SIZE_BYTES) {
+                    // This tempFile is from the *previous* segment
                     saveSegmentToFolder(tempFile, segmentCounter);
-                    segmentCounter++;
+                    segmentCounter++; // Increment counter *after* saving the previous one
                 } else {
                     log("Deleting small previous segment (" + tempFile.length() + " bytes)");
                     if (!tempFile.delete()) log("WARN: Failed delete prev temp");
                 }
-                tempFile = null; // Reset ref
+                tempFile = null; // Nullify ref before creating the new one
             }
         }
 
-        // Creates a new temp file for the segment
+
         private void createNewTempFile() throws IOException {
             tempFile = File.createTempFile("rec_segment_" + segmentCounter + "_", ".mp4", getCacheDir());
             log("Created temp file: " + tempFile.getName());
         }
 
-        // Sets up the listener for MediaPlayer events
         private void setupMediaPlayerEventListener() {
             mediaPlayer.setEventListener(event -> {
                 switch (event.type) {
@@ -638,7 +632,6 @@ public class MainActivity extends AppCompatActivity {
                         handleConnectionLoss("Stream ended");
                         break;
                     case MediaPlayer.Event.Stopped:
-                        // Handle unexpected stops if we should be recording
                         if (shouldBeRecording && connectionState != ConnectionState.RECONNECTING && connectionState != ConnectionState.DISCONNECTED) {
                             log("Stream stopped unexpectedly (state: "+connectionState+")");
                             isConnecting = false; connectionState = ConnectionState.DISCONNECTED;
@@ -649,28 +642,25 @@ public class MainActivity extends AppCompatActivity {
             });
         }
 
-        // Schedules the start of the next segment
         private void scheduleNextSegment() {
             cancelExistingSegmentCallback();
             segmentRunnable = () -> {
-                if (shouldBeRecording && mediaPlayer != null && mediaPlayer.isPlaying()) {
+                if (shouldBeRecording && mediaPlayer != null && (mediaPlayer.isPlaying() || connectionState == ConnectionState.CONNECTED)) { // Check state too
                     log("Segment duration reached, starting next...");
                     startNewSegment();
                 } else if (shouldBeRecording) {
-                    log("Segment timer fired but not playing, treating as loss.");
-                    handleConnectionLoss("Not playing at segment end");
+                    log("Segment timer fired but not playing/connected, treating as loss.");
+                    handleConnectionLoss("Not playing/connected at segment end");
                 }
             };
             segmentHandler.postDelayed(segmentRunnable, SEGMENT_DURATION_MS);
         }
 
-        // Cancels any pending segment timer
         private void cancelExistingSegmentCallback() {
             if (segmentRunnable != null) segmentHandler.removeCallbacks(segmentRunnable);
             segmentRunnable = null;
         }
 
-        // Starts the connection timeout timer
         private void startConnectionWatchdog() {
             cancelConnectionWatchdog();
             watchdogRunnable = () -> {
@@ -683,53 +673,54 @@ public class MainActivity extends AppCompatActivity {
             watchdogHandler.postDelayed(watchdogRunnable, CONNECTION_TIMEOUT_MS);
         }
 
-        // Cancels the connection timeout timer
         private void cancelConnectionWatchdog() {
             if (watchdogRunnable != null) watchdogHandler.removeCallbacks(watchdogRunnable);
             watchdogRunnable = null;
         }
 
-        // Handles stream loss: saves partial segment, schedules reconnect
+        // Handles stream loss: DISCARDS current segment, schedules reconnect
         private void handleConnectionLoss(String reason) {
-            if (!shouldBeRecording) return; // Ignore if stopped manually
+            if (!shouldBeRecording) return;
 
             isConnecting = false; connectionState = ConnectionState.RECONNECTING;
             isRecording = false; consecutiveFailures++;
             log("⚠ Connection lost: " + reason + " (#" + consecutiveFailures + ")");
 
-            cancelExistingSegmentCallback(); // Stop segment timer
-            cancelConnectionWatchdog(); // Stop connection timer
+            cancelExistingSegmentCallback();
+            cancelConnectionWatchdog();
 
-            handlePartialSegmentSave(); // Save partial data if valid
+            // *** MODIFIED: ALWAYS DISCARD SEGMENT ON FAILURE WITH STREAM COPY ***
+            discardCurrentSegmentOnFailure();
+            // *******************************************************************
 
-            // Determine reconnect delay (short initially, longer after repeated failures)
             long delay = (consecutiveFailures <= MAX_CONSECUTIVE_FAILURES) ? RECONNECT_DELAY_SHORT_MS : RECONNECT_DELAY_LONG_MS;
             String delayMsg = (delay / 1000) + "s";
             log("Reconnecting in " + delayMsg + "...");
             updateNotification("Reconnecting in " + delayMsg + "...");
-            scheduleReconnect(delay); // Schedule the attempt
+            scheduleReconnect(delay);
         }
 
-        // Saves partially recorded segment if it meets size/duration criteria
-        private void handlePartialSegmentSave() {
+        // *** NEW METHOD TO DISCARD CORRUPTED SEGMENT ***
+        private void discardCurrentSegmentOnFailure() {
             if (tempFile != null && tempFile.exists()) {
                 long duration = (segmentStartTime > 0) ? (System.currentTimeMillis() - segmentStartTime) : 0;
                 long size = tempFile.length();
-                if (size > MIN_SEGMENT_SIZE_BYTES && duration > 10000) { // Require >10s recording
-                    log("Saving partial segment (" + (size / 1024) + " KB, " + (duration / 1000) + "s)");
-                    saveSegmentToFolder(tempFile, segmentCounter);
-                    segmentCounter++;
-                } else {
-                    log("Discarding small partial segment (" + (size / 1024) + " KB, " + (duration / 1000) + "s)");
-                    if (!tempFile.delete()) log("WARN: Failed discard partial temp");
+                log("Discarding segment due to connection failure (" + (size / 1024) + " KB, " + (duration / 1000) + "s)");
+                if (!tempFile.delete()) {
+                    log("WARN: Failed to delete corrupted temp file after connection loss");
                 }
-                tempFile = null; segmentStartTime = 0; // Reset state
+                tempFile = null; // Nullify reference
+                segmentStartTime = 0; // Reset start time
+            } else {
+                log("No temp file found to discard on connection failure.");
             }
         }
+        // ********************************************
 
-        // Schedules a reconnect attempt
+        // Removed handlePartialSegmentSave as we now always discard on failure
+
         private void scheduleReconnect(long delay) {
-            cancelReconnect(); // Ensure only one reconnect is scheduled
+            cancelReconnect();
             reconnectHandler.postDelayed(() -> {
                 if (shouldBeRecording) {
                     log("Attempting reconnect #" + (consecutiveFailures + 1) + "...");
@@ -738,16 +729,14 @@ public class MainActivity extends AppCompatActivity {
             }, delay);
         }
 
-        // Cancels pending reconnect attempts
         private void cancelReconnect() {
             if (reconnectHandler != null) reconnectHandler.removeCallbacksAndMessages(null);
         }
 
-        // Saves a segment file to the designated output folder
         private void saveSegmentToFolder(File segmentFileToSave, int segmentNumberToSave) {
             log("Saving segment " + segmentNumberToSave + "...");
-            new Thread(() -> { // File IO on background thread
-                DocumentFile savedFile = null; // Track if file was created for cleanup on error
+            new Thread(() -> {
+                DocumentFile savedFile = null;
                 try {
                     DocumentFile folder = DocumentFile.fromTreeUri(this, outputFolderUri);
                     if (folder == null || !folder.exists() || !folder.isDirectory()) {
@@ -755,7 +744,7 @@ public class MainActivity extends AppCompatActivity {
                     }
 
                     String fileName = "rec_" + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date()) + "_seg" + segmentNumberToSave + ".mp4";
-                    savedFile = folder.createFile("video/mp4", fileName); // Store reference
+                    savedFile = folder.createFile("video/mp4", fileName);
                     if (savedFile == null) {
                         throw new IOException("Failed to create file: " + fileName);
                     }
@@ -769,67 +758,72 @@ public class MainActivity extends AppCompatActivity {
                             fos.write(buffer, 0, read); bytesCopied += read;
                         }
                         fos.flush();
-                    } // Auto-close streams
+                    }
 
                     final long finalSize = bytesCopied;
                     final String finalName = fileName;
-                    runOnUiThread(() -> { // Show success on UI thread
+                    runOnUiThread(() -> {
                         String sizeStr = String.format(Locale.US, "%.2f MB", finalSize / 1024.0 / 1024.0);
                         Toast.makeText(this, "Segment " + segmentNumberToSave + " saved (" + sizeStr + ")", Toast.LENGTH_SHORT).show();
                         log("✓ Segment " + segmentNumberToSave + " saved: " + finalName + " (" + sizeStr + ")");
                     });
 
-                    // Delete temp file *after* successful copy and UI update
-                    if (!segmentFileToSave.delete()) log("WARN: Failed delete temp after save: " + segmentFileToSave.getName());
-                    log("Temp file deleted for segment " + segmentNumberToSave);
+                    // Delete temp file *only after* successful copy and UI update confirmed
+                    // Moved deletion here for clarity, was implicitly handled before by lack of error
+                    // Ensure the deletion happens after the UI thread updates
+                    // No need to explicitly delete here, handlePreviousSegment/saveFinalSegment/discard handles it
 
                 } catch (Exception e) {
                     log("ERROR saving segment " + segmentNumberToSave + ": " + e.getMessage());
                     runOnUiThread(() -> Toast.makeText(this, "Error saving segment " + segmentNumberToSave + ": " + e.getMessage(), Toast.LENGTH_LONG).show());
-                    // Cleanup: Delete the partially created file in SAF if it exists
                     if (savedFile != null && savedFile.exists()) {
-                        if (savedFile.delete()) {
-                            log("Deleted partially saved file: " + savedFile.getName());
-                        } else {
-                            log("WARN: Failed to delete partially saved file: " + savedFile.getName());
-                        }
+                        if (!savedFile.delete()) log("WARN: Failed to delete partially saved file: " + savedFile.getName());
                     }
-                    // Attempt to delete original temp file even on error
-                    if (segmentFileToSave != null && segmentFileToSave.exists() && !segmentFileToSave.delete()) {
-                        log("WARN: Failed delete temp after save error: " + segmentFileToSave.getName());
+                    // Do NOT delete the original temp file here on error, let cleanup handle it
+                } finally {
+                    // Ensure temp file is deleted *if it still exists* after trying to save
+                    // This covers cases where saving failed but the temp file wasn't deleted
+                    // However, deletion is primarily handled in handlePreviousSegment, discardCurrentSegmentOnFailure, saveFinalSegment
+                    // Maybe add a check here if needed, but it might conflict with other deletion logic.
+                    // For now, rely on the other methods. If segmentFileToSave still exists here, it's potentially an issue.
+
+                    // Let's explicitly try deleting the source *after* the save attempt finishes (success or fail)
+                    // This ensures we clean up the source temp file.
+                    if (segmentFileToSave != null && segmentFileToSave.exists()) {
+                        log("Cleaning up source temp file for segment " + segmentNumberToSave);
+                        if (!segmentFileToSave.delete()) {
+                            log("WARN: Failed to delete source temp file after save attempt: " + segmentFileToSave.getName());
+                        }
                     }
                 }
             }).start();
         }
 
-        // Builds the foreground service notification
+
         private Notification buildNotification(String text) {
-            int icon = R.mipmap.ic_launcher; // Use app icon
+            int icon = R.mipmap.ic_launcher;
             return new NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
                     .setContentTitle("RTSP Recorder")
                     .setContentText(text)
                     .setSmallIcon(icon)
                     .setPriority(NotificationCompat.PRIORITY_LOW)
-                    .setOngoing(true) // Make it persistent
+                    .setOngoing(true)
                     .build();
         }
 
-        // Updates the foreground service notification text
         private void updateNotification(String text) {
             NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-            if (nm != null) nm.notify(1, buildNotification(text)); // Use ID 1 to update
+            if (nm != null) nm.notify(1, buildNotification(text));
         }
 
-        // Public method for activity to check recording state
         public boolean isRecording() { return isRecording; }
 
-        // Creates Notification Channel for Android Oreo+
         private void createNotificationChannel() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 NotificationChannel channel = new NotificationChannel(
                         NOTIFICATION_CHANNEL_ID,
                         "Recording Status",
-                        NotificationManager.IMPORTANCE_LOW); // Low importance = no sound/vibration
+                        NotificationManager.IMPORTANCE_LOW);
                 channel.setDescription("Shows RTSP recording status");
                 NotificationManager manager = getSystemService(NotificationManager.class);
                 if (manager != null) {
